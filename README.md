@@ -295,7 +295,7 @@ for details.
 
 ## 🖥 GPU worker
 
-A one-job HTTP worker for mesh export lives in [worker/README.md](worker/README.md). It calls the mesh-only inference path and refuses to run when CUDA is missing. The result is a generated scene, not a photograph of the property.
+A one-job HTTP worker for mesh export lives in [worker/README.md](worker/README.md). It uses a CUDA GPU when one is visible and the same mesh path on CPU when it is not. The result is a generated scene, not a photograph of the property.
 
 ## 📄 License
 

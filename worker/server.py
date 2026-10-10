@@ -24,6 +24,7 @@ TIMEOUT = int(os.environ.get("SAT3DGEN_TIMEOUT", "1200"))
 HOST = os.environ.get("WORKER_HOST", "127.0.0.1")
 PORT = int(os.environ.get("WORKER_PORT", "8088"))
 NOTICE = "Generated scene. Not a photograph and not a survey of the parcel."
+CPU_NOTICE = NOTICE + " Ran on CPU because no CUDA GPU was available. This is slow and is still not the property."
 
 LOCK = threading.Lock()
 RUNNING: str | None = None
@@ -38,6 +39,34 @@ def cuda_available() -> bool:
     except ImportError:
         return False
     return bool(torch.cuda.is_available())
+
+
+def device_mode() -> str:
+    mode = os.environ.get("SAT3DGEN_DEVICE", "auto").strip().lower()
+    if mode not in ("auto", "cpu", "cuda"):
+        return "auto"
+    return mode
+
+
+def choose_device() -> str:
+    mode = device_mode()
+    if mode == "cpu":
+        return "cpu"
+    if cuda_available():
+        return "cuda"
+    if mode == "cuda":
+        raise HTTPException(status_code=503, detail="No CUDA GPU. Set SAT3DGEN_DEVICE=auto to run on CPU.")
+    return "cpu"
+
+
+def job_timeout(device: str) -> int:
+    if device == "cpu":
+        return int(os.environ.get("SAT3DGEN_CPU_TIMEOUT", "21600"))
+    return TIMEOUT
+
+
+def job_notice(device: str) -> str:
+    return CPU_NOTICE if device == "cpu" else NOTICE
 
 
 def require_token(authorization: str | None) -> None:
@@ -72,10 +101,11 @@ def find_mesh(path: Path) -> Path | None:
     return matches[0] if matches else None
 
 
-def run_job(path: Path, image: Path, job_id: str) -> None:
+def run_job(path: Path, image: Path, job_id: str, device: str) -> None:
     global RUNNING
     status = read_status(path)
     status["state"] = "running"
+    status["device"] = device
     write_status(path, status)
     command = [
         "python",
@@ -89,14 +119,18 @@ def run_job(path: Path, image: Path, job_id: str) -> None:
         "--only_save_mesh",
         "true",
     ]
+    env = os.environ.copy()
+    if device == "cpu":
+        env["CUDA_VISIBLE_DEVICES"] = ""
     try:
         proc = subprocess.run(
             command,
             cwd=ROOT,
             capture_output=True,
             text=True,
-            timeout=TIMEOUT,
+            timeout=job_timeout(device),
             check=False,
+            env=env,
         )
         (path / "log.txt").write_text(((proc.stdout or "") + (proc.stderr or ""))[-8000:])
         mesh = find_mesh(path / "out")
@@ -106,7 +140,7 @@ def run_job(path: Path, image: Path, job_id: str) -> None:
         else:
             status["state"] = "done"
             status["mesh"] = str(mesh.relative_to(path))
-            status["notice"] = NOTICE
+            status["notice"] = job_notice(device)
     except subprocess.TimeoutExpired:
         status["state"] = "failed"
         status["error"] = "Inference timed out."
@@ -121,15 +155,27 @@ def run_job(path: Path, image: Path, job_id: str) -> None:
 
 @app.get("/health")
 def health():
-    return {"ok": True, "cuda": cuda_available(), "busy": RUNNING is not None, "model": MODEL, "notice": NOTICE}
+    mode = device_mode()
+    cuda = cuda_available()
+    device = "cuda" if cuda and mode != "cpu" else "cpu"
+    if mode == "cuda" and not cuda:
+        device = "unavailable"
+    return {
+        "ok": True,
+        "cuda": cuda,
+        "device": device,
+        "mode": mode,
+        "busy": RUNNING is not None,
+        "model": MODEL,
+        "notice": CPU_NOTICE if device == "cpu" else NOTICE,
+    }
 
 
 @app.post("/v1/jobs")
 async def create_job(authorization: str | None = Header(default=None), image: UploadFile = File(...)):
     global RUNNING
     require_token(authorization)
-    if not cuda_available():
-        raise HTTPException(status_code=503, detail="No CUDA GPU. This worker does not run the model on CPU.")
+    device = choose_device()
     suffix = ALLOWED.get(image.content_type or "")
     if not suffix:
         raise HTTPException(status_code=415, detail="Send a PNG, JPEG, or WebP satellite image.")
@@ -146,14 +192,14 @@ async def create_job(authorization: str | None = Header(default=None), image: Up
         path.mkdir(parents=True, exist_ok=False)
         image_path = path / f"input{suffix}"
         image_path.write_bytes(data)
-        status = {"id": job_id, "state": "queued", "notice": NOTICE}
+        status = {"id": job_id, "state": "queued", "device": device, "notice": job_notice(device)}
         write_status(path, status)
     except Exception:
         with LOCK:
             if RUNNING == job_id:
                 RUNNING = None
         raise
-    threading.Thread(target=run_job, args=(path, image_path, job_id), daemon=True).start()
+    threading.Thread(target=run_job, args=(path, image_path, job_id, device), daemon=True).start()
     return status
 
 
