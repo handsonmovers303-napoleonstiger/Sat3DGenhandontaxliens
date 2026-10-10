@@ -293,6 +293,10 @@ We welcome contributions of any kind — bug fixes, new features, documentation
 improvements, and benchmark extensions. See [CONTRIBUTING.md](CONTRIBUTING.md)
 for details.
 
+## 🖥 GPU worker
+
+A one-job HTTP worker for mesh export lives in [worker/README.md](worker/README.md). It calls the mesh-only inference path and refuses to run when CUDA is missing. The result is a generated scene, not a photograph of the property.
+
 ## 📄 License
 
 This project is released under the [MIT License](LICENSE).

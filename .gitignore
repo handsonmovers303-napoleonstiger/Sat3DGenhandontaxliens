@@ -18,3 +18,4 @@ demo_train_2gpu.sh
 app_launch.log
 hf_space/
 assets/
+worker_jobs/
